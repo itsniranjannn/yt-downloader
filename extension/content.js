@@ -36,10 +36,17 @@ function saveSettings(settings) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Panel injection
 // ─────────────────────────────────────────────────────────────────────────────
-function injectPanel() {
-  const onVideo    = window.location.href.includes("/watch");
-  const onPlaylist = window.location.href.includes("list=");
+function injectPanel() {  
+  const urlObj = new URL(window.location.href);
 
+  const onVideo = urlObj.pathname === "/watch";
+
+  const onPlaylist =
+    urlObj.pathname === "/playlist" ||
+    (
+      urlObj.pathname === "/watch" &&
+      urlObj.searchParams.has("list")
+    );
   if (!onVideo && !onPlaylist) {
     document.getElementById("yth-toggle-btn")?.remove();
     document.getElementById("yt-helper-panel")?.remove();
@@ -455,15 +462,33 @@ function injectPanel() {
 
     fetchSingleFormats(url);
 
-    if (url.includes("list=")) {
+    let isRealPlaylist = false;
+
+    try {
+      const parsed = new URL(url);
+
+      isRealPlaylist =
+        parsed.pathname === "/playlist" ||
+        (
+          parsed.pathname === "/watch" &&
+          parsed.searchParams.has("list")
+        );
+    } catch {
+      isRealPlaylist = false;
+    }
+
+    if (isRealPlaylist) {
       plBar.style.display = "flex";
       plCount.textContent = "This video is part of a playlist";
+
       plProgress.innerHTML = "";
+
       const viewBtn = document.createElement("button");
       viewBtn.className = "yth-queue-btn";
       viewBtn.style.marginLeft = "auto";
       viewBtn.textContent = "View playlist";
       viewBtn.onclick = () => loadPlaylist(url);
+
       plProgress.appendChild(viewBtn);
     }
   }
@@ -489,7 +514,10 @@ function injectPanel() {
         url: e.url, title: e.title, thumbnail: e.thumbnail || null,
       }));
       renderQueue();
-      queueWrap.style.display = "block";
+      queueWrap.style.display  =
+      isPlaylist || queue.length
+      ? "block"
+      : "none";;
       queueBody.style.display = "block";
       queueToggle.textContent = "Hide";
       setLog(`Playlist loaded (${data.count} videos). Remove any you don't want, then hit Download.`, "muted");
@@ -569,7 +597,10 @@ function injectPanel() {
       return;
     }
     let html = queue.map((item, i) => `
-      <div class="yth-queue-item" data-i="${i}" draggable="true">
+      <div class="yth-queue-item"
+      data-i="${i}"
+      data-id="${item._downloadId || ''}"
+      draggable="true">
         <span class="yth-queue-num">${i + 1}</span>
         ${item.thumbnail
           ? `<img class="yth-queue-thumb" src="${item.thumbnail}" alt="">`
@@ -598,7 +629,11 @@ function injectPanel() {
   document.getElementById("yth-queue-add").onclick = () => {
     const raw = queueInput.value.trim();
     if (!raw) return;
-    const item = { url: raw, title: raw };
+    const item = {
+      url: raw,
+      title: "Loading title...",
+      loading: true
+    };
     queue.push(item);
     queueInput.value = "";
     renderQueue();
@@ -612,6 +647,8 @@ function injectPanel() {
       .then(data => {
         if (data.title) item.title = data.title;
         if (data.thumbnail) item.thumbnail = data.thumbnail;
+
+        item.loading = false;
         renderQueue();
       })
       .catch(() => { /* keep raw URL */ });
@@ -714,6 +751,16 @@ function injectPanel() {
       setLog("Queue is empty — nothing to download.", "error");
       return;
     }
+    const loadingItems =
+      queue.filter(q => q.loading);
+
+    if (loadingItems.length) {
+      setLog(
+        "Please wait until video info finishes loading.",
+        "error"
+      );
+      return;
+    }
 
     // Clear any old open-folder button from log
     log.innerHTML = "";
@@ -728,6 +775,7 @@ function injectPanel() {
 
     for (let i = 0; i < queue.length; i++) {
       const item = queue[i];
+      item._downloadId ??= crypto.randomUUID();
       dlLabel.textContent = total > 1 ? `${i + 1}/${total}…` : "Downloading…";
       if (total > 1) plProgress.textContent = `${i + 1} / ${total}`;
       setProgress(0);
@@ -740,7 +788,7 @@ function injectPanel() {
       } else if (result === "ok") {
         done++;
         // Mark done in queue
-        const itemEl = queueList.querySelector(`[data-i="${i}"]`);
+        const itemEl =  queueList.querySelector(`[data-id="${item._downloadId}"]`);
         if (itemEl) itemEl.classList.add("yth-queue-done");
       } else {
         errors++;
@@ -766,7 +814,7 @@ function injectPanel() {
     isDownloading = false;
     resetDownloadUI(null, null);
     if (done > 0) {
-      fetch(`${SERVER}/history`);
+      renderHistory();
     }
   };
 

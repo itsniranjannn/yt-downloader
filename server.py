@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import shutil
 import socketserver
 import subprocess
 import threading
@@ -33,12 +34,36 @@ def _no_window_kwargs():
     si.wShowWindow = 0
     return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": si}
 
-# ── EXPLICIT FFMPEG LOCATION ──────────────────────────────────────────────
-FFMPEG_DIR = r"C:\ffmpeg\bin"
+# ── FFMPEG DETECTION ──────────────────────────────────────────────────────
+
+FFMPEG_DIR = os.environ.get("FFMPEG_DIR", r"C:\ffmpeg\bin")
+NODE_EXE   = os.environ.get("NODE_EXE", r"C:\Program Files\nodejs\node.exe")
+os.environ["PATH"] = str(Path(NODE_EXE).parent) + os.pathsep + os.environ.get("PATH", "")
+
+def get_ffmpeg_location():
+    # First try your preferred location
+    if Path(FFMPEG_DIR).exists():
+        return FFMPEG_DIR
+
+    # Then try PATH
+    ffmpeg_path = shutil.which("ffmpeg")
+
+    if ffmpeg_path:
+        return str(Path(ffmpeg_path).parent)
+
+    return None
 
 def ffmpeg_args():
-    if Path(FFMPEG_DIR).exists():
-        return ["--ffmpeg-location", FFMPEG_DIR]
+    location = get_ffmpeg_location()
+    if location:
+        return ["--ffmpeg-location", location]
+    return []
+
+def node_args():
+    """Pass Node.js path explicitly so yt-dlp finds it even when PATH
+    is not inherited correctly by the pythonw process on Windows."""
+    if Path(NODE_EXE).exists():
+        return ["--js-runtimes", f"node:{NODE_EXE}"]
     return []
 
 _shutdown_event = threading.Event()
@@ -155,15 +180,21 @@ def cancel_download():
 # ── STATUS PAGE ────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
-    ffmpeg_ok = Path(FFMPEG_DIR).exists()
-    status = "✓ found" if ffmpeg_ok else "✗ NOT FOUND — edit FFMPEG_DIR in server.py"
+    ffmpeg_location = get_ffmpeg_location()
+    ffmpeg_ok = ffmpeg_location is not None
+
+    status = (
+        "✓ found ({ffmpeg_location})"
+        if ffmpeg_ok
+        else "✗ NOT FOUND"
+    )
     return f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><title>NJK - YT-Downloader</title>
 <style>body{{font-family:system-ui;max-width:480px;margin:60px auto;padding:0 20px}}
 h2{{color:#22c55e}}code{{background:#f3f3f3;padding:2px 7px;border-radius:4px}}</style></head><body>
 <h2>NJK - YT-Downloader is running ✓</h2>
 <p>Listening on <code>localhost:9999</code>.<br>
-ffmpeg: <code>{FFMPEG_DIR}</code> — {status}</p>
+ffmpeg: <code>{ffmpeg_location or "Not Found"}</code> — {status}</p>
 </body></html>"""
 
 # ── FORMATS (single video) ─────────────────────────────────────────────────
@@ -175,7 +206,7 @@ def formats():
         return jsonify(error="No URL"), 400
 
     result = subprocess.run(
-        ["yt-dlp", "--dump-json", "--no-playlist", *ffmpeg_args(), url],
+        ["yt-dlp", "--dump-json", "--no-playlist", *ffmpeg_args(), *node_args(), url],
         capture_output=True, text=True, timeout=30,
         **_no_window_kwargs(),
     )
@@ -268,7 +299,7 @@ def playlist_info():
         return jsonify(error="No URL"), 400
 
     result = subprocess.run(
-        ["yt-dlp", "--flat-playlist", "--dump-json", *ffmpeg_args(), url],
+        ["yt-dlp", "--flat-playlist", "--dump-json", *ffmpeg_args(), *node_args(), url],
         capture_output=True, text=True, timeout=60,
         **_no_window_kwargs(),
     )
@@ -353,8 +384,12 @@ def download():
 
     if not url:
         return jsonify(error="No URL"), 400
-    if not Path(FFMPEG_DIR).exists():
-        return jsonify(error=f"ffmpeg not found at {FFMPEG_DIR}. Edit FFMPEG_DIR in server.py."), 500
+    ffmpeg_location = get_ffmpeg_location()
+
+    if not ffmpeg_location:
+        return jsonify(
+            error="FFmpeg not found. Install FFmpeg or add it to PATH."
+        ), 500
 
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
@@ -363,6 +398,7 @@ def download():
     if use_cookies:
         cmd_base.extend(["--cookies-from-browser", "chrome"])
     cmd_base.extend(ffmpeg_args())
+    cmd_base.extend(node_args())
 
     if mode == "audio":
         audio_fmt = data.get("audio_format", "mp3_320")
@@ -445,6 +481,11 @@ def download():
         proc.wait()
 
         with process_lock:
+            # Read and reset cancelled flag atomically with clearing the process
+            # reference so cancel() arriving between proc.wait() and here can't
+            # set the flag after we've already read it as False.
+            was_cancelled = current_download_cancelled
+            current_download_cancelled = False
             if current_download_process == proc:
                 current_download_process = None
 
@@ -468,8 +509,6 @@ def download():
 
         # ── Signal done ────────────────────────────────────────────────────
         if proc.returncode != 0:
-            with process_lock:
-                was_cancelled = current_download_cancelled
             if was_cancelled:
                 progress_q.put("__ERRORMSG__Cancelled by user.")
             else:
