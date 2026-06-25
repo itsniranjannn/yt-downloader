@@ -1,0 +1,5 @@
+flask>=3.0
+yt-dlp>=2024.8.1
+pystray>=0.19
+Pillow>=10.0
+requests>=2.31
