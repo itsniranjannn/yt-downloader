@@ -97,7 +97,7 @@ def update_ytdlp():
             tray_icon.title = f"{APP_NAME} — Updating yt-dlp…"
         try:
             result = subprocess.run(
-                ["yt-dlp", "-U"],
+                [server.YTDLP_EXE, "-U"],
                 capture_output=True, text=True,
                 **_no_window_kwargs(),
             )

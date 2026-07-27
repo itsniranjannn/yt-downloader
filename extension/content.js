@@ -17,20 +17,36 @@ function fmtDur(s) {
 // ── Settings persistence ──────────────────────────────────────────────────
 const SETTINGS_KEY = "yth_settings";
 
+function extensionAlive() {
+  return !!(chrome.runtime && chrome.runtime.id);
+}
+
 function loadSettings() {
   return new Promise((resolve) => {
-    chrome.storage.local.get(SETTINGS_KEY, (result) => {
-      resolve(result[SETTINGS_KEY] || {});
-    });
+    if (!extensionAlive()) { resolve({}); return; }
+    try {
+      chrome.storage.local.get(SETTINGS_KEY, (result) => {
+        if (chrome.runtime.lastError) { resolve({}); return; }
+        resolve(result[SETTINGS_KEY] || {});
+      });
+    } catch (e) {
+      resolve({});
+    }
   });
 }
 
 function saveSettings(settings) {
-  chrome.storage.local.get(SETTINGS_KEY, (result) => {
-    const current = result[SETTINGS_KEY] || {};
-    const merged = { ...current, ...settings };
-    chrome.storage.local.set({ [SETTINGS_KEY]: merged });
-  });
+  if (!extensionAlive()) return;
+  try {
+    chrome.storage.local.get(SETTINGS_KEY, (result) => {
+      if (chrome.runtime.lastError) return;
+      const current = result[SETTINGS_KEY] || {};
+      const merged = { ...current, ...settings };
+      chrome.storage.local.set({ [SETTINGS_KEY]: merged });
+    });
+  } catch (e) {
+    // extension context invalidated (was reloaded) — ignore, tab needs a refresh
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

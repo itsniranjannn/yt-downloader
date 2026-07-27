@@ -4,6 +4,7 @@ import queue
 import shutil
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -34,23 +35,115 @@ def _no_window_kwargs():
     si.wShowWindow = 0
     return {"creationflags": subprocess.CREATE_NO_WINDOW, "startupinfo": si}
 
-# ── FFMPEG DETECTION ──────────────────────────────────────────────────────
+# ── APP-RELATIVE BIN FOLDER ─────────────────────────────────────────────────
+# Works whether running as a plain .py/.pyw script or as a frozen PyInstaller
+# .exe. Binaries live in <app_dir>/bin so the app is self-contained and needs
+# no separate install of yt-dlp or ffmpeg on the target machine.
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent
+
+APP_DIR = _app_dir()
+BIN_DIR = APP_DIR / "bin"
+BIN_DIR.mkdir(exist_ok=True)
+
+YTDLP_LOCAL = BIN_DIR / "yt-dlp.exe"
+FFMPEG_LOCAL_DIR = BIN_DIR / "ffmpeg"
+FFMPEG_LOCAL_EXE = FFMPEG_LOCAL_DIR / "ffmpeg.exe"
 
 FFMPEG_DIR = os.environ.get("FFMPEG_DIR", r"C:\ffmpeg\bin")
 NODE_EXE   = os.environ.get("NODE_EXE", r"C:\Program Files\nodejs\node.exe")
 os.environ["PATH"] = str(Path(NODE_EXE).parent) + os.pathsep + os.environ.get("PATH", "")
 
+YTDLP_RELEASE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+FFMPEG_RELEASE_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+
+def _download_file(url, dest_path, timeout=120):
+    import requests
+    with requests.get(url, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        tmp = Path(str(dest_path) + ".part")
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                if chunk:
+                    f.write(chunk)
+        tmp.replace(dest_path)
+
+def _ensure_ytdlp_downloaded():
+    """Download the official standalone yt-dlp.exe into bin/ if not present."""
+    if YTDLP_LOCAL.exists():
+        return
+    try:
+        _download_file(YTDLP_RELEASE_URL, YTDLP_LOCAL)
+    except Exception as e:
+        print(f"[yt-dlp] auto-download failed: {e}")
+
+def _ensure_ffmpeg_downloaded():
+    """Download a static ffmpeg build into bin/ffmpeg/ if not present."""
+    if FFMPEG_LOCAL_EXE.exists():
+        return
+    try:
+        import zipfile
+        zip_path = BIN_DIR / "_ffmpeg_dl.zip"
+        _download_file(FFMPEG_RELEASE_URL, zip_path)
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.namelist():
+                name = Path(member).name
+                if name.lower() in ("ffmpeg.exe", "ffprobe.exe"):
+                    FFMPEG_LOCAL_DIR.mkdir(exist_ok=True)
+                    with zf.open(member) as src, open(FFMPEG_LOCAL_DIR / name, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        zip_path.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"[ffmpeg] auto-download failed: {e}")
+
+# ── YT-DLP DETECTION ──────────────────────────────────────────────────────
+# Order: env override -> bundled bin/ -> PATH -> pip Scripts folder ->
+# auto-download into bin/ as a last resort.
+def _find_ytdlp():
+    env_override = os.environ.get("YTDLP_EXE")
+    if env_override and Path(env_override).exists():
+        return env_override
+
+    if YTDLP_LOCAL.exists():
+        return str(YTDLP_LOCAL)
+
+    found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+    if found:
+        return found
+
+    candidates = [
+        Path(sys.executable).parent / "Scripts" / "yt-dlp.exe",
+        Path(sys.executable).parent / "yt-dlp.exe",
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+
+    _ensure_ytdlp_downloaded()
+    if YTDLP_LOCAL.exists():
+        return str(YTDLP_LOCAL)
+
+    return "yt-dlp"  # last resort; will raise a clear error at call time
+
+YTDLP_EXE = _find_ytdlp()
+
 def get_ffmpeg_location():
-    # First try your preferred location
+    # 1) bundled copy
+    if FFMPEG_LOCAL_EXE.exists():
+        return str(FFMPEG_LOCAL_DIR)
+    # 2) explicit override / historical default
     if Path(FFMPEG_DIR).exists():
         return FFMPEG_DIR
-
-    # Then try PATH
+    # 3) PATH
     ffmpeg_path = shutil.which("ffmpeg")
-
     if ffmpeg_path:
         return str(Path(ffmpeg_path).parent)
-
+    # 4) auto-download into bin/ffmpeg
+    _ensure_ffmpeg_downloaded()
+    if FFMPEG_LOCAL_EXE.exists():
+        return str(FFMPEG_LOCAL_DIR)
     return None
 
 def ffmpeg_args():
@@ -87,13 +180,15 @@ def add_cors(r):
     r.headers["Access-Control-Allow-Private-Network"] = "true" 
     return r
 
-@app.route("/options", methods=["OPTIONS"])
-def options():
-    resp = Response(status=204)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Allow-Private-Network"] = "true"
-    return resp
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        resp = Response(status=204)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Private-Network"] = "true"
+        return resp
 
 # ── SHUTDOWN ───────────────────────────────────────────────────────────────
 @app.route("/shutdown", methods=["POST"])
@@ -206,7 +301,7 @@ def formats():
         return jsonify(error="No URL"), 400
 
     result = subprocess.run(
-        ["yt-dlp", "--dump-json", "--no-playlist", *ffmpeg_args(), *node_args(), url],
+        [YTDLP_EXE, "--dump-json", "--no-playlist", *ffmpeg_args(), *node_args(), url],
         capture_output=True, text=True, timeout=30,
         **_no_window_kwargs(),
     )
@@ -299,7 +394,7 @@ def playlist_info():
         return jsonify(error="No URL"), 400
 
     result = subprocess.run(
-        ["yt-dlp", "--flat-playlist", "--dump-json", *ffmpeg_args(), *node_args(), url],
+        [YTDLP_EXE, "--flat-playlist", "--dump-json", *ffmpeg_args(), *node_args(), url],
         capture_output=True, text=True, timeout=60,
         **_no_window_kwargs(),
     )
@@ -330,7 +425,7 @@ def update_ytdlp():
 
     def run():
         proc = subprocess.Popen(
-            ["yt-dlp", "-U"],
+            [YTDLP_EXE, "-U"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             **_no_window_kwargs(),
         )
@@ -394,7 +489,7 @@ def download():
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     # ── Build yt-dlp command ───────────────────────────────────────────────
-    cmd_base = ["yt-dlp", "--no-playlist"]
+    cmd_base = [YTDLP_EXE, "--no-playlist"]
     if use_cookies:
         cmd_base.extend(["--cookies-from-browser", "chrome"])
     cmd_base.extend(ffmpeg_args())
