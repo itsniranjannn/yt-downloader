@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+
+# Downloaded runtime binaries; server.py fetches these when needed.
+bin/
+
+# Local downloads
+downloads/*
+!downloads/.gitkeep

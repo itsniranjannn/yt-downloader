@@ -141,11 +141,16 @@ The extension's entire job is capturing the current video's URL and forwarding i
 <br/>
 
 1. Download or clone this repository, then extract if downloaded as a ZIP
-2. Open `chrome://extensions` (or `brave://extensions`, `edge://extensions`)
-3. Enable **Developer Mode**
-4. Click **Load unpacked**
-5. Select the extension folder
-6. Open YouTube — the **Download** button appears below supported videos 🎉
+2. Install the Python dependencies from the project folder:
+  ```powershell
+  py -m pip install -r requirements.txt
+  ```
+3. Open `app.pyw` to start the local server and tray app. The app automatically downloads `yt-dlp` and FFmpeg into `bin/` when they are needed.
+4. Open `chrome://extensions` (or `brave://extensions`, `edge://extensions`)
+5. Enable **Developer Mode**
+6. Click **Load unpacked**
+7. Select the `extension` folder
+8. Open YouTube — the **Download** button appears below supported videos 🎉
 
 <br/>
 
